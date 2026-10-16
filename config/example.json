@@ -1,0 +1,43 @@
+{
+  "targets": {
+    "gowave": {
+      "url": "http://127.0.0.1:3000",
+      "token_env": "GOWAVE_BENCH_TOKEN",
+      "metadata": {
+        "revision": "record the Gowave commit",
+        "database": "PostgreSQL 17; dedicated benchmark database",
+        "resources": "record CPU affinity/quota, RAM limit and database pool size"
+      }
+    },
+    "remnawave": {
+      "url": "http://127.0.0.1:3010",
+      "token_env": "REMNAWAVE_BENCH_TOKEN",
+      "metadata": {
+        "revision": "record the backend commit or image digest",
+        "database": "PostgreSQL 17; dedicated benchmark database",
+        "resources": "record CPU affinity/quota, RAM limit, worker count and database pool size"
+      }
+    }
+  },
+  "dataset": {
+    "prefix": "bench",
+    "users": 1000,
+    "hosts": 20,
+    "expire_at": "2035-01-01T00:00:00.000Z"
+  },
+  "load": {
+    "rates": [50, 100, 250, 500, 1000, 2000],
+    "concurrency": [1, 10, 50, 100, 250, 500],
+    "duration_seconds": 60,
+    "warmup_seconds": 10,
+    "cooldown_seconds": 5,
+    "repetitions": 3,
+    "preallocated_vus": 256,
+    "max_vus": 1024,
+    "timeout_seconds": 10,
+    "max_error_rate": 0.01,
+    "p99_ms": 500,
+    "min_completion_ratio": 0.99,
+    "sample_interval_seconds": 0.25
+  }
+}

@@ -1,0 +1,5 @@
+config/local.json
+results/
+fixtures/
+__pycache__/
+.venv/

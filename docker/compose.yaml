@@ -1,0 +1,126 @@
+name: gowave-benchmark
+
+x-app: &app
+  cpus: ${APP_CPUS:-2}
+  mem_limit: ${APP_MEMORY:-2g}
+  memswap_limit: ${APP_MEMORY:-2g}
+  restart: "no"
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "2"
+
+x-app-env: &app-env
+  APP_PORT: "3000"
+  METRICS_PORT: "3001"
+  METRICS_USER: benchmark
+  METRICS_PASS: ${APP_SECRET:?Run benchmarks/bench.py init first}
+  APP_SECRET: ${APP_SECRET:?Run benchmarks/bench.py init first}
+  TZ: UTC
+  NODE_ENV: production
+  FRONT_END_DOMAIN: "*"
+  PANEL_DOMAIN: bench.example.invalid
+  SUB_PUBLIC_DOMAIN: bench.example.invalid/api/sub
+  IS_HTTP_LOGGING_ENABLED: "false"
+  IS_TELEGRAM_NOTIFICATIONS_ENABLED: "false"
+  WEBHOOK_ENABLED: "false"
+  EXPORT_TO_STREAM_ENABLED: "false"
+
+x-db: &db
+  image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17}
+  cpus: ${DB_CPUS:-1}
+  mem_limit: ${DB_MEMORY:-1g}
+  memswap_limit: ${DB_MEMORY:-1g}
+  shm_size: 256m
+  restart: "no"
+  command: [postgres, -c, max_connections=200, -c, shared_buffers=128MB]
+  environment:
+    POSTGRES_USER: benchmark
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run benchmarks/bench.py init first}
+    POSTGRES_DB: benchmark
+    TZ: UTC
+  healthcheck:
+    test: [CMD-SHELL, "pg_isready -U benchmark -d benchmark"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+
+services:
+  gowave:
+    <<: *app
+    image: localhost/gowave-benchmark:local
+    build:
+      context: ../../backend-go
+      dockerfile: ../benchmarks/docker/Dockerfile
+      args:
+        GO_IMAGE: ${GO_IMAGE:-docker.io/library/golang:1.27.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-docker.io/library/debian:trixie-slim}
+        REVISION: ${GOWAVE_REVISION:-unknown}
+    environment:
+      <<: *app-env
+      DB_DRIVER: postgres
+      DATABASE_URL: postgresql://benchmark:${POSTGRES_PASSWORD}@gowave-db:5432/benchmark?sslmode=disable
+      GOMAXPROCS: ${GO_PROCS:-2}
+    ports:
+      - 127.0.0.1:${GOWAVE_PORT:-33000}:3000
+    depends_on:
+      gowave-db:
+        condition: service_healthy
+    networks: [gowave]
+  remnawave:
+    <<: *app
+    image: ${REMNAWAVE_IMAGE:?Set an exact Remnawave image in .env}
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql://benchmark:${POSTGRES_PASSWORD}@remnawave-db:5432/benchmark?connection_limit=50
+      REDIS_SOCKET: /var/run/valkey/valkey.sock
+      API_INSTANCES: ${API_INSTANCES:-1}
+      WORKER_INSTANCES: "1"
+    ports:
+      - 127.0.0.1:${REMNAWAVE_PORT:-33010}:3000
+    volumes:
+      - valkey-socket:/var/run/valkey
+    depends_on:
+      remnawave-db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    networks: [remnawave]
+  gowave-db:
+    <<: *db
+    volumes: [gowave-db:/var/lib/postgresql/data]
+    networks: [gowave]
+  remnawave-db:
+    <<: *db
+    volumes: [remnawave-db:/var/lib/postgresql/data]
+    networks: [remnawave]
+  valkey:
+    image: ${VALKEY_IMAGE:-docker.io/valkey/valkey:9-alpine}
+    cpus: ${CACHE_CPUS:-0.5}
+    mem_limit: ${CACHE_MEMORY:-256m}
+    memswap_limit: ${CACHE_MEMORY:-256m}
+    restart: "no"
+    command: [valkey-server, --save, "", --appendonly, "no", --maxmemory-policy, noeviction, --loglevel, warning, --unixsocket, /var/run/valkey/valkey.sock, --unixsocketperm, "777", --port, "0"]
+    volumes: [valkey-socket:/var/run/valkey]
+    healthcheck:
+      test: [CMD, valkey-cli, -s, /var/run/valkey/valkey.sock, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    networks: [remnawave]
+
+networks:
+  gowave:
+    driver: bridge
+  remnawave:
+    driver: bridge
+
+volumes:
+  gowave-db:
+  remnawave-db:
+  valkey-socket:
