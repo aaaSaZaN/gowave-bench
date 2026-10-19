@@ -3,6 +3,10 @@ name: Benchmark
 on:
   workflow_dispatch:
     inputs:
+      gowave_repository:
+        description: Gowave repository (a fork benchmarks upstream unless changed)
+        default: aaaSaZaN/gowave
+        required: true
       gowave_ref:
         description: Gowave branch, tag or commit to benchmark
         default: main
@@ -51,7 +55,7 @@ jobs:
       # Same layout as a local lab: the suite lives in the Gowave checkout's benchmarks/.
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/gowave
+          repository: ${{ inputs.gowave_repository }}
           ref: ${{ inputs.gowave_ref }}
           path: gowave
       - uses: actions/checkout@v4
@@ -76,7 +80,7 @@ jobs:
         run: |
           mkdir -p "$RESULTS"
           {
-            echo "gowave_ref=${{ inputs.gowave_ref }}"
+            echo "gowave=${{ inputs.gowave_repository }}@${{ inputs.gowave_ref }}"
             echo "gowave_commit=$(git -C gowave rev-parse HEAD)"
             echo "bench_commit=$(git -C gowave/benchmarks rev-parse HEAD)"
             echo "remnawave_image=${{ inputs.remnawave_image }}"
@@ -129,11 +133,18 @@ jobs:
         run: |
           python benchmarks/bench.py figures --load "$RESULTS/rate" --connections "$RESULTS/concurrency" \
             --startup "$RESULTS/startup" --output "$RESULTS/figures"
-          for report in concurrency rate startup; do
-            echo "## $report"; echo
-            sed '/^!\[/d' "$RESULTS/$report/report.md"
+          # The reports link their SVGs relatively; in a job summary those links
+          # resolve under the run URL and 404, so point to the artifact instead.
+          {
+            echo "Charts (SVG) are in the run artifact, folder \`figures/\`:"
+            echo "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID#artifacts"
             echo
-          done >> "$GITHUB_STEP_SUMMARY"
+            for report in concurrency rate startup; do
+              echo "## $report"; echo
+              sed -e '/^!\[/d' -e '/^- \[[^]]*\]([^)]*\.svg)$/d' -e '/^## Load response charts$/d' "$RESULTS/$report/report.md"
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Container logs
         if: always()
