@@ -173,10 +173,12 @@ def overview(plt, data, startup, colors, path, title):
     groups = data["groups"]
     startup_targets = sorted({r["target"] for r in startup})
     nrows = max(1, len(groups) + bool(startup_targets))
-    figure, axes = plt.subplots(nrows, 3, figsize=(15, 3.8 * nrows + 1.2), squeeze=False)
-    figure.subplots_adjust(top=1 - 1.25 / (3.8 * nrows + 1.2), bottom=0.12 / nrows,
+    height = 3.8 * nrows + 1.8
+    figure, axes = plt.subplots(nrows, 3, figsize=(15, height), squeeze=False)
+    # Margins in inches: the title must clear the two-line panel headings.
+    figure.subplots_adjust(top=1 - 1.85 / height, bottom=0.12 / nrows,
                            hspace=0.85, wspace=0.34)
-    figure.suptitle(title, x=0.05, ha="left", fontsize=20, fontweight="bold")
+    figure.suptitle(title, x=0.05, y=1 - 0.3 / height, ha="left", va="top", fontsize=20, fontweight="bold")
     for index, group in enumerate(groups):
         targets = data["targets"]
         heading = f"{group['workload']} / {group['mode']}"

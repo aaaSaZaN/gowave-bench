@@ -63,6 +63,9 @@ services:
         REVISION: ${GOWAVE_REVISION:-unknown}
     environment:
       <<: *app-env
+      # Gowave binds to loopback by default; the published port needs the bridge address.
+      APP_HOST: 0.0.0.0
+      DB_MAX_CONNECTIONS: ${GOWAVE_DB_MAX_CONNECTIONS:-}
       DB_DRIVER: postgres
       DATABASE_URL: postgresql://benchmark:${POSTGRES_PASSWORD}@gowave-db:5432/benchmark?sslmode=disable
       GOMAXPROCS: ${GO_PROCS:-2}

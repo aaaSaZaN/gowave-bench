@@ -1,0 +1,160 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      gowave_ref:
+        description: Gowave branch, tag or commit to benchmark
+        default: main
+        required: true
+      remnawave_image:
+        description: Remnawave backend image (exact tag or digest)
+        default: docker.io/remnawave/backend:3.4.5
+        required: true
+      profile:
+        description: quick checks a change in ~25 min; full is the published set (~2 h)
+        type: choice
+        options: [quick, full]
+        default: quick
+      runner:
+        description: Runner label; the default has 4 vCPU, larger runners give the load generator more headroom
+        default: ubuntu-24.04
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r config/requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: node tests/workload.test.mjs
+
+  benchmark:
+    needs: check
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 330
+    env:
+      K6_VERSION: "1.6.1"
+      RESULTS: ${{ github.workspace }}/results
+    steps:
+      # Same layout as a local lab: the suite lives in the Gowave checkout's benchmarks/.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/gowave
+          ref: ${{ inputs.gowave_ref }}
+          path: gowave
+      - uses: actions/checkout@v4
+        with:
+          path: gowave/benchmarks
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r gowave/benchmarks/config/requirements.txt
+
+      - name: Install k6
+        run: |
+          base=https://github.com/grafana/k6/releases/download/v${K6_VERSION}
+          archive=k6-v${K6_VERSION}-linux-amd64.tar.gz
+          curl -fsSLO "$base/$archive"
+          curl -fsSL "$base/k6-v${K6_VERSION}-checksums.txt" | grep " $archive\$" | sha256sum -c -
+          tar -xzf "$archive"
+          sudo install "k6-v${K6_VERSION}-linux-amd64/k6" /usr/local/bin/k6
+          k6 version
+
+      - name: Record the machine
+        run: |
+          mkdir -p "$RESULTS"
+          {
+            echo "gowave_ref=${{ inputs.gowave_ref }}"
+            echo "gowave_commit=$(git -C gowave rev-parse HEAD)"
+            echo "bench_commit=$(git -C gowave/benchmarks rev-parse HEAD)"
+            echo "remnawave_image=${{ inputs.remnawave_image }}"
+            echo "runner=${{ inputs.runner }} ($RUNNER_NAME, image $ImageOS $ImageVersion)"
+            echo; uname -a; echo; lscpu; echo; free -h; echo; df -h /; echo
+            docker version; echo; cat /sys/fs/cgroup/cgroup.controllers
+          } | tee "$RESULTS/machine.txt"
+          if [ "$(nproc)" -lt 4 ]; then
+            echo "::warning::$(nproc) CPUs: the active panel (2), its database (1) and k6 will compete"
+          fi
+
+      - name: Start both stacks
+        working-directory: gowave
+        run: |
+          python benchmarks/bench.py init --remnawave-image "${{ inputs.remnawave_image }}"
+          python benchmarks/bench.py up
+          python benchmarks/bench.py configure --register
+          python benchmarks/bench.py prepare
+          docker image inspect --format '{{.RepoTags}} {{.RepoDigests}} {{.Id}}' \
+            "${{ inputs.remnawave_image }}" docker.io/library/postgres:17 >> "$RESULTS/machine.txt" || true
+
+      - name: Write the load config
+        id: config
+        working-directory: gowave
+        run: |
+          label="GitHub Actions ${{ inputs.runner }}, ${{ inputs.profile }}, gowave $(git rev-parse --short HEAD) vs ${{ inputs.remnawave_image }}"
+          python benchmarks/ci/config.py "${{ inputs.profile }}" "$label" "$RUNNER_TEMP/ci.json" >> "$GITHUB_OUTPUT"
+          cp "$RUNNER_TEMP/ci.json" "$RESULTS/config.json"
+
+      # Exit 2 means a run missed the SLO; overload levels are expected to, and reports are still written.
+      - name: Concurrent clients
+        working-directory: gowave
+        run: |
+          python benchmarks/bench.py run --config "$RUNNER_TEMP/ci.json" --modes concurrency \
+            --workloads ${{ steps.config.outputs.concurrency_workloads }} --output "$RESULTS/concurrency" || [ $? -eq 2 ]
+
+      - name: Fixed rate
+        working-directory: gowave
+        run: |
+          python benchmarks/bench.py run --config "$RUNNER_TEMP/ci.json" --modes rate \
+            --workloads ${{ steps.config.outputs.rate_workloads }} --output "$RESULTS/rate" || [ $? -eq 2 ]
+
+      # Startup trials leave the panels stopped, so they run last.
+      - name: Startup
+        working-directory: gowave
+        run: python benchmarks/bench.py startup --config "$RUNNER_TEMP/ci.json" --repetitions 10 --output "$RESULTS/startup"
+
+      - name: Figures
+        working-directory: gowave
+        run: |
+          python benchmarks/bench.py figures --load "$RESULTS/rate" --connections "$RESULTS/concurrency" \
+            --startup "$RESULTS/startup" --output "$RESULTS/figures"
+          for report in concurrency rate startup; do
+            echo "## $report"; echo
+            sed '/^!\[/d' "$RESULTS/$report/report.md"
+            echo
+          done >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Container logs
+        if: always()
+        working-directory: gowave
+        run: |
+          mkdir -p "$RESULTS/logs"
+          for service in gowave remnawave gowave-db remnawave-db valkey; do
+            docker compose --project-name gowave-benchmark --env-file benchmarks/docker/.env \
+              --file benchmarks/docker/compose.yaml logs --no-color "$service" > "$RESULTS/logs/$service.log" 2>&1 || true
+          done
+
+      # Fixtures hold subscription identifiers and docker/.env the generated
+      # credentials; neither is under $RESULTS.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-${{ inputs.profile }}-${{ github.run_number }}
+          path: ${{ env.RESULTS }}
+          retention-days: 90
+
+      - name: Stop
+        if: always()
+        working-directory: gowave
+        run: python benchmarks/bench.py down || true

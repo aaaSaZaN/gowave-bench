@@ -1,4 +1,5 @@
 config/local.json
+docker/.env
 results/
 fixtures/
 __pycache__/

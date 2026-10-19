@@ -234,6 +234,63 @@ def process_rss(roots, proc=Path("/proc")):
     return sum(processes[pid][1] for pid in included) * os.sysconf("SC_PAGE_SIZE")
 
 
+def container_cgroup(container):
+    pid = container["State"]["Pid"]
+    if not container["State"]["Running"] or pid <= 0:
+        raise ValueError("A monitored container is stopped")
+    membership = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+    relative = next((line[3:] for line in membership if line.startswith("0::")), None)
+    if relative is None or ".." in Path(relative).parts:
+        raise ValueError("Container accounting requires a local Linux cgroup v2 host")
+    path = Path("/sys/fs/cgroup") / relative.lstrip("/")
+    if not (path / "memory.current").is_file():
+        raise ValueError("Container cgroup is not visible on this host; use local Linux or --memory-scope none")
+    return path
+
+
+def lab_containers(target):
+    """Role -> container id for a managed-lab target (application, database, valkey)."""
+    metadata = target.get("metadata", {})
+    return {role: metadata[role]["container_id"] for role in ("application", "database", "valkey")
+            if isinstance(metadata.get(role), dict) and metadata[role].get("container_id")}
+
+
+def cpu_reader(target):
+    """Returns a function reading cpu.stat counters per container role, or None."""
+    containers = lab_containers(target)
+    engine = target.get("memory", {}).get("engine", "docker")
+    if not containers:
+        return None
+    info = json.loads(subprocess.check_output([engine, "inspect", *containers.values()], text=True, timeout=10))
+    paths = {role: container_cgroup(item) / "cpu.stat" for role, item in zip(containers, info)}
+
+    def read():
+        stats = {}
+        for role, path in paths.items():
+            values = dict(line.split() for line in path.read_text().splitlines())
+            stats[role] = {key: int(values[key]) for key in ("usage_usec", "nr_periods", "nr_throttled", "throttled_usec") if key in values}
+        return stats
+    return read
+
+
+def cpu_delta(before, after):
+    return {role: {key: after[role][key] - value for key, value in counters.items()}
+            for role, counters in before.items()}
+
+
+def settle(target):
+    """CHECKPOINT and VACUUM the target's database so earlier runs' dirty pages and dead rows
+    are not flushed or vacuumed during the next measurement. Applied identically to every target."""
+    database = lab_containers(target).get("database")
+    if not database:
+        return
+    engine = target.get("memory", {}).get("engine", "docker")
+    user = os.environ.get("BENCH_DB_USER", "benchmark")
+    subprocess.run([engine, "exec", database, "psql", "-q", "-U", user, "-d", user,
+                    "-c", "CHECKPOINT", "-c", "VACUUM (ANALYZE)"], check=True, timeout=300,
+                   stdout=subprocess.DEVNULL)
+
+
 def memory_reader(target):
     memory = target.get("memory")
     if not memory:
@@ -245,19 +302,7 @@ def memory_reader(target):
             raise ValueError("memory.containers must identify running benchmark containers")
         info = json.loads(subprocess.check_output(
             [memory.get("engine", "docker"), "inspect", *containers], text=True, timeout=10))
-        paths = []
-        for container in info:
-            pid = container["State"]["Pid"]
-            if not container["State"]["Running"] or pid <= 0:
-                raise ValueError("A monitored container is stopped")
-            membership = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
-            relative = next((line[3:] for line in membership if line.startswith("0::")), None)
-            if relative is None or ".." in Path(relative).parts:
-                raise ValueError("Container memory requires a local Linux cgroup v2 host")
-            path = Path("/sys/fs/cgroup") / relative.lstrip("/")
-            if not (path / "memory.current").is_file():
-                raise ValueError("Container cgroup is not visible on this host; use local Linux or --memory-scope none")
-            paths.append(str(path))
+        paths = [str(container_cgroup(container)) for container in info]
         reader, description = memory_reader({"memory": {"kind": "cgroup", "paths": paths}})
         return reader, f"{description}; container scope={memory.get('scope', 'app')}"
     if kind == "proc":
@@ -454,11 +499,16 @@ def run_load(args, config):
                 if code not in (0, 99) or metric(summary, "bench_errors", "rate", 1) > load["max_error_rate"]:
                     raise RuntimeError(f"{name}: warmup failed; inspect {label}-warmup/k6.log")
             directory = destination / label
+            if load.get("settle_databases") and not args.smoke:
+                settle(target)
+            cpu = cpu_reader(target)
+            cpu_before = cpu() if cpu else None
             code, summary, memory = k6_run(args, config, target, tokens[name], fixtures[name], workload,
                                             mode, level, directory, load["duration_seconds"])
             record = {"target": name, "workload": workload, "mode": mode, "level": level, "repetition": rep,
                       "directory": label, "exit_code": code,
-                      **score(summary, mode, level, load["duration_seconds"], load, code), "memory": memory}
+                      **score(summary, mode, level, load["duration_seconds"], load, code), "memory": memory,
+                      "cpu": cpu_delta(cpu_before, cpu()) if cpu else None}
             save(directory / "result.json", record)
             records.append(record)
             save(destination / "results.json", records)

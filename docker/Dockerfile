@@ -8,7 +8,7 @@ COPY cmd/ ./cmd/
 COPY config/ ./config/
 COPY internal/ ./internal/
 ARG REVISION=unknown
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-X remnawave-go/internal/system.AppVersion=bench-${REVISION}" -o /panel ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-X gowave/internal/system.AppVersion=bench-${REVISION}" -o /panel ./cmd/server
 
 FROM ${RUNTIME_IMAGE}
 ARG REVISION=unknown
