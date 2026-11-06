@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: benchmark
+  group: benchmark-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
