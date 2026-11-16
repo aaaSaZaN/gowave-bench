@@ -39,10 +39,12 @@ def initialize(image):
     if ":" not in image.rsplit("/", 1)[-1] or image.endswith(":latest"):
         raise ValueError("Use a versioned Remnawave tag or @sha256 digest, not latest")
     revision = subprocess.check_output(["git", "-C", str(ROOT.parent.parent), "rev-parse", "HEAD"], text=True).strip()
+    backend_dir = "../../backend" if (ROOT.parent.parent / "backend").is_dir() else "../../backend-go"
     values = dict(REMNAWAVE_IMAGE=image, POSTGRES_IMAGE="docker.io/library/postgres:17",
                   VALKEY_IMAGE="docker.io/valkey/valkey:9-alpine", APP_SECRET=secrets.token_hex(32),
                   POSTGRES_PASSWORD=secrets.token_hex(24), BENCH_ADMIN_USERNAME="benchmark",
                   BENCH_ADMIN_PASSWORD=secrets.token_urlsafe(32) + "Aa1", GOWAVE_REVISION=revision,
+                  GOWAVE_BACKEND_DIR=backend_dir,
                   APP_CPUS="2", APP_MEMORY="2g", DB_CPUS="1", DB_MEMORY="1g",
                   CACHE_CPUS="0.5", CACHE_MEMORY="256m", GO_PROCS="2", API_INSTANCES="1",
                   GOWAVE_PORT="33000", REMNAWAVE_PORT="33010")

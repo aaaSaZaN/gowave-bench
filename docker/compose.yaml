@@ -55,7 +55,7 @@ services:
     <<: *app
     image: localhost/gowave-benchmark:local
     build:
-      context: ../../backend-go
+      context: ${GOWAVE_BACKEND_DIR:-../../backend}
       dockerfile: ../benchmarks/docker/Dockerfile
       args:
         GO_IMAGE: ${GO_IMAGE:-docker.io/library/golang:1.27.1}
